@@ -128,21 +128,25 @@ export default function GoalCreationPage() {
           <button
             onClick={handleSubmit}
             disabled={!description.trim() || isPending}
-            className="bg-secondary-fixed text-on-primary-fixed border-[4px] border-black px-12 py-6 font-headline font-black text-2xl tracking-tighter uppercase shadow-neobrutal-lg hover:-translate-y-1 hover:-translate-x-1 hover:shadow-neobrutal-xl active:translate-y-1 active:translate-x-1 active:shadow-[2px_2px_0px_0px_#000000] transition-all group flex items-center justify-center gap-4 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:translate-x-0 disabled:hover:translate-y-0"
+            className={`border-[4px] border-black px-12 py-6 font-headline font-black text-2xl tracking-tighter uppercase shadow-neobrutal-lg transition-all group flex items-center justify-center gap-4 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:translate-x-0 disabled:hover:translate-y-0 ${
+              isPending
+                ? "bg-black text-secondary-container animate-pulse"
+                : "bg-secondary-fixed text-on-primary-fixed hover:-translate-y-1 hover:-translate-x-1 hover:shadow-neobrutal-xl active:translate-y-1 active:translate-x-1 active:shadow-[2px_2px_0px_0px_#000000]"
+            }`}
           >
-            {isPending ? "INITIALIZING..." : "LET'S PLAN THIS"}
-            <span className="material-symbols-outlined text-3xl font-bold group-hover:translate-x-2 transition-transform">
-              arrow_right_alt
+            {isPending ? "CLARIFYING..." : "LET'S PLAN THIS"}
+            <span className={`material-symbols-outlined text-3xl font-bold transition-transform ${isPending ? "animate-spin" : "group-hover:translate-x-2"}`}>
+              {isPending ? "progress_activity" : "arrow_right_alt"}
             </span>
           </button>
 
           {/* Keyboard hint */}
           <div className="flex flex-col items-end">
             <span className="font-headline text-[9px] font-bold text-outline uppercase tracking-[0.3em]">
-              Command_Prompt
+              {isPending ? "System_Status" : "Command_Prompt"}
             </span>
             <span className="font-body text-xs font-bold opacity-40 italic">
-              Press CMD + Enter to initialize
+              {isPending ? "Generating title and first clarifying questions" : "Press CMD + Enter to initialize"}
             </span>
           </div>
         </div>

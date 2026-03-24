@@ -1,10 +1,16 @@
+import { useLayoutEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
 import { useParams } from "react-router-dom";
 import { goalsApi } from "../api/goals";
 import TopNavBar from "../components/layout/TopNavBar";
 import type { Goal, Milestone, MilestoneStatus, Step } from "../types";
-import { computeDagLayout, type Position } from "../utils/dagLayout";
+import {
+  computeDagLayout,
+  DAG_LAYER_GAP,
+  DAG_NODE_MIN_HEIGHT,
+  DAG_NODE_WIDTH,
+  type Position,
+} from "../utils/dagLayout";
 
 const MILESTONE_STYLES: Record<MilestoneStatus, { card: string; text: string; icon: string }> = {
   done: { card: "bg-green-500 border-4 border-black", text: "text-black", icon: "check_circle" },
@@ -13,14 +19,19 @@ const MILESTONE_STYLES: Record<MilestoneStatus, { card: string; text: string; ic
   pending: { card: "bg-white border-4 border-black border-dashed", text: "text-gray-400", icon: "star" },
 };
 
+const EDGE_ARROW_GAP = 8;
+
 interface NodeCardProps {
   milestone: Milestone;
+  dependencyNodeIds: string[];
   position: Position;
+  minHeight: number;
   isSelected: boolean;
   onClick: () => void;
+  onMeasure: (milestoneId: string, height: number) => void;
 }
 
-function NodeCard({ milestone, position, isSelected, onClick }: NodeCardProps) {
+function NodeCard({ milestone, dependencyNodeIds, position, minHeight, isSelected, onClick, onMeasure }: NodeCardProps) {
   const style = MILESTONE_STYLES[milestone.status];
   const pct = milestone.steps_total > 0
     ? Math.round((milestone.steps_completed / milestone.steps_total) * 100)
@@ -29,10 +40,15 @@ function NodeCard({ milestone, position, isSelected, onClick }: NodeCardProps) {
   return (
     <div
       className={`absolute cursor-pointer group transition-transform hover:-translate-y-1 ${isSelected ? "ring-4 ring-offset-2 ring-black" : ""}`}
-      style={{ left: position.x, top: position.y, width: 192, zIndex: 10 }}
+      ref={(node) => {
+        if (node) {
+          onMeasure(milestone.id, node.offsetHeight);
+        }
+      }}
+      style={{ left: position.x, top: position.y, width: DAG_NODE_WIDTH, minHeight, zIndex: 10 }}
       onClick={onClick}
     >
-      <div className={`${style.card} p-4 shadow-neobrutal`}>
+      <div className={`${style.card} p-4 shadow-neobrutal flex min-h-full flex-col`}>
         <div className="flex justify-between mb-2">
           <span className={`font-mono text-[10px] font-bold ${style.text}`}>{milestone.node_id}</span>
           <span className={`material-symbols-outlined text-sm ${milestone.status === "active" ? "animate-pulse" : ""} ${style.text}`}>
@@ -43,10 +59,13 @@ function NodeCard({ milestone, position, isSelected, onClick }: NodeCardProps) {
           {milestone.title}
         </h3>
         {milestone.description && (
-          <p className={`font-mono text-[9px] mt-1 ${style.text} opacity-70 leading-snug normal-case`}>
+          <p className={`font-mono text-[9px] mt-2 flex-1 ${style.text} opacity-70 leading-snug normal-case`}>
             {milestone.description}
           </p>
         )}
+        <p className={`font-mono text-[8px] mt-2 uppercase tracking-tight ${style.text} opacity-65`}>
+          {dependencyNodeIds.length > 0 ? `Depends on: ${dependencyNodeIds.join(", ")}` : "Root milestone"}
+        </p>
         {milestone.blocker_reason && (
           <p className={`font-mono text-[9px] mt-2 ${style.text} opacity-70`}>
             BLOCKED BY: {milestone.blocker_reason.toUpperCase()}
@@ -65,23 +84,57 @@ function NodeCard({ milestone, position, isSelected, onClick }: NodeCardProps) {
 function MilestoneConnectors({
   milestones,
   positions,
+  measuredHeights,
 }: {
   milestones: Milestone[];
   positions: Map<string, Position>;
+  measuredHeights: Map<string, number>;
 }) {
-  const lines: { x1: number; y1: number; x2: number; y2: number; key: string }[] = [];
+  const layerByMilestoneId = new Map<string, number>();
+  const layerTop = new Map<number, number>();
+  const layerBottom = new Map<number, number>();
+  for (const milestone of milestones) {
+    const position = positions.get(milestone.id);
+    if (!position) continue;
+    const layer = Math.round((position.y - 40) / (DAG_NODE_MIN_HEIGHT + DAG_LAYER_GAP));
+    const height = measuredHeights.get(milestone.id) ?? DAG_NODE_MIN_HEIGHT;
+    layerByMilestoneId.set(milestone.id, layer);
+    layerTop.set(layer, Math.min(layerTop.get(layer) ?? position.y, position.y));
+    layerBottom.set(layer, Math.max(layerBottom.get(layer) ?? position.y + height, position.y + height));
+  }
+  const lines: {
+    startX: number;
+    startY: number;
+    laneY: number;
+    endX: number;
+    endY: number;
+    key: string;
+  }[] = [];
   for (const m of milestones) {
     const mPos = positions.get(m.id);
     if (!mPos) continue;
-    for (const depId of m.depends_on) {
+    const sortedDeps = [...m.depends_on].sort((a, b) => {
+      const aPos = positions.get(a);
+      const bPos = positions.get(b);
+      return (aPos?.x ?? 0) - (bPos?.x ?? 0);
+    });
+    for (const [depIndex, depId] of sortedDeps.entries()) {
       const depPos = positions.get(depId);
       if (!depPos) continue;
-      // Connect center-bottom of dep to center-top of m
-      const x1 = depPos.x + 96;
-      const y1 = depPos.y + 80; // approx card height
-      const x2 = mPos.x + 96;
-      const y2 = mPos.y;
-      lines.push({ x1, y1, x2, y2, key: `${depId}-${m.id}` });
+      const depLayer = layerByMilestoneId.get(depId) ?? 0;
+      const childLayer = layerByMilestoneId.get(m.id) ?? depLayer + 1;
+      const depHeight = measuredHeights.get(depId) ?? DAG_NODE_MIN_HEIGHT;
+      const startX = depPos.x + DAG_NODE_WIDTH / 2;
+      const startY = depPos.y + depHeight;
+      const endX = mPos.x + DAG_NODE_WIDTH / 2;
+      const endY = mPos.y - EDGE_ARROW_GAP;
+      const corridorTop = (layerBottom.get(depLayer) ?? startY) + 10;
+      const corridorBottom = (layerTop.get(childLayer) ?? mPos.y) - 10;
+      const baseLaneY = corridorTop < corridorBottom
+        ? corridorTop + (corridorBottom - corridorTop) / 2
+        : startY + 24;
+      const laneY = baseLaneY + (depIndex - (sortedDeps.length - 1) / 2) * 14;
+      lines.push({ startX, startY, laneY, endX, endY, key: `${depId}-${m.id}` });
     }
   }
 
@@ -92,13 +145,13 @@ function MilestoneConnectors({
           <polygon points="0 0, 8 3, 0 6" fill="black" />
         </marker>
       </defs>
-      {lines.map(({ x1, y1, x2, y2, key }) => (
+      {lines.map(({ startX, startY, laneY, endX, endY, key }) => (
         <g key={key}>
-          <line x1={x1} y1={y1} x2={x1} y2={(y1 + y2) / 2} stroke="black" strokeWidth="2" />
-          <line x1={x1} y1={(y1 + y2) / 2} x2={x2} y2={(y1 + y2) / 2} stroke="black" strokeWidth="2" />
+          <line x1={startX} y1={startY} x2={startX} y2={laneY} stroke="black" strokeWidth="2" />
+          <line x1={startX} y1={laneY} x2={endX} y2={laneY} stroke="black" strokeWidth="2" />
           <line
-            x1={x2} y1={(y1 + y2) / 2}
-            x2={x2} y2={y2 - 4}
+            x1={endX} y1={laneY}
+            x2={endX} y2={endY}
             stroke="black" strokeWidth="2"
             markerEnd="url(#arrowhead)"
           />
@@ -221,6 +274,7 @@ export default function PlanViewPage() {
   const [selectedMilestoneId, setSelectedMilestoneId] = useState<string | null>(null);
   const [blockerText, setBlockerText] = useState("");
   const [showBlockerInput, setShowBlockerInput] = useState(false);
+  const [nodeHeights, setNodeHeights] = useState<Record<string, number>>({});
 
   const { data: goal } = useQuery({
     queryKey: ["goal", id],
@@ -254,7 +308,39 @@ export default function PlanViewPage() {
   });
 
   const positions = computeDagLayout(plan?.milestones ?? []);
+  const nodeIdByMilestoneId = new Map((plan?.milestones ?? []).map((milestone) => [milestone.id, milestone.node_id]));
+  const measuredHeights = new Map(Object.entries(nodeHeights));
+  const layerIndexByMilestoneId = new Map<string, number>();
+  for (const [milestoneId, position] of positions) {
+    layerIndexByMilestoneId.set(
+      milestoneId,
+      Math.round((position.y - 40) / (DAG_NODE_MIN_HEIGHT + DAG_LAYER_GAP)),
+    );
+  }
+  const layerIds = Array.from(new Set(layerIndexByMilestoneId.values())).sort((a, b) => a - b);
+  const extraOffsetByLayer = new Map<number, number>();
+  let runningOffset = 0;
+  for (const layerId of layerIds) {
+    extraOffsetByLayer.set(layerId, runningOffset);
+    const layerMilestones = (plan?.milestones ?? []).filter((milestone) => layerIndexByMilestoneId.get(milestone.id) === layerId);
+    const maxHeight = Math.max(
+      DAG_NODE_MIN_HEIGHT,
+      ...layerMilestones.map((milestone) => measuredHeights.get(milestone.id) ?? DAG_NODE_MIN_HEIGHT),
+    );
+    runningOffset += Math.max(0, maxHeight - DAG_NODE_MIN_HEIGHT);
+  }
+  const adjustedPositions = new Map<string, Position>();
+  for (const [milestoneId, position] of positions) {
+    const layerId = layerIndexByMilestoneId.get(milestoneId) ?? 0;
+    adjustedPositions.set(milestoneId, {
+      x: position.x,
+      y: position.y + (extraOffsetByLayer.get(layerId) ?? 0),
+    });
+  }
   const selectedMilestone = plan?.milestones.find((milestone) => milestone.id === selectedMilestoneId) ?? null;
+  const selectedDependencyNodeIds = (selectedMilestone?.depends_on ?? [])
+    .map((depId) => nodeIdByMilestoneId.get(depId))
+    .filter((value): value is string => Boolean(value));
 
   const linkedSteps = (plan?.steps ?? [])
     .filter((s) => selectedMilestone ? s.milestone_id === selectedMilestone.id : false)
@@ -284,10 +370,40 @@ export default function PlanViewPage() {
   const totalCount = plan?.milestones.length ?? 0;
   const pct = totalCount > 0 ? Math.round((completedCount / totalCount) * 100) : 0;
 
+  useLayoutEffect(() => {
+    setNodeHeights((prev) => {
+      const next: Record<string, number> = {};
+      let changed = false;
+      for (const milestone of plan?.milestones ?? []) {
+        const prevHeight = prev[milestone.id];
+        const nextHeight = measuredHeights.get(milestone.id);
+        if (nextHeight) {
+          next[milestone.id] = nextHeight;
+          if (prevHeight !== nextHeight) {
+            changed = true;
+          }
+        } else if (prevHeight) {
+          next[milestone.id] = prevHeight;
+        }
+      }
+      if (!changed && Object.keys(next).length === Object.keys(prev).length) {
+        return prev;
+      }
+      return next;
+    });
+  }, [plan, measuredHeights]);
+
   // Canvas dimensions based on computed positions
-  const allPositions = Array.from(positions.values());
-  const canvasWidth = Math.max(700, ...allPositions.map((p) => p.x + 250));
-  const canvasHeight = Math.max(650, ...allPositions.map((p) => p.y + 200));
+  const allPositions = Array.from(adjustedPositions.values());
+  const canvasWidth = Math.max(820, ...allPositions.map((p) => p.x + DAG_NODE_WIDTH + 72));
+  const canvasHeight = Math.max(
+    680,
+    ...(plan?.milestones ?? []).map((milestone) => {
+      const position = adjustedPositions.get(milestone.id);
+      const height = measuredHeights.get(milestone.id) ?? DAG_NODE_MIN_HEIGHT;
+      return (position?.y ?? 0) + height + DAG_LAYER_GAP;
+    }),
+  );
 
   return (
     <div className="bg-surface text-on-surface font-body h-screen overflow-hidden">
@@ -359,13 +475,24 @@ export default function PlanViewPage() {
                   className="relative"
                   style={{ width: canvasWidth, height: canvasHeight }}
                 >
-                  <MilestoneConnectors milestones={plan?.milestones ?? []} positions={positions} />
+                  <MilestoneConnectors
+                    milestones={plan?.milestones ?? []}
+                    positions={adjustedPositions}
+                    measuredHeights={measuredHeights}
+                  />
                   {plan?.milestones.map((milestone) => (
                     <NodeCard
                       key={milestone.id}
                       milestone={milestone}
-                      position={positions.get(milestone.id) ?? { x: 0, y: 0 }}
+                      dependencyNodeIds={milestone.depends_on
+                        .map((depId) => nodeIdByMilestoneId.get(depId))
+                        .filter((value): value is string => Boolean(value))}
+                      position={adjustedPositions.get(milestone.id) ?? { x: 0, y: 0 }}
+                      minHeight={DAG_NODE_MIN_HEIGHT}
                       isSelected={selectedMilestone?.id === milestone.id}
+                      onMeasure={(milestoneId, height) => {
+                        setNodeHeights((prev) => (prev[milestoneId] === height ? prev : { ...prev, [milestoneId]: height }));
+                      }}
                       onClick={() =>
                         setSelectedMilestoneId((prev) => (prev === milestone.id ? null : milestone.id))
                       }
@@ -407,6 +534,13 @@ export default function PlanViewPage() {
             {selectedMilestone?.description && (
               <p className="text-[10px] font-mono mt-2 text-gray-300 normal-case leading-relaxed">
                 {selectedMilestone.description}
+              </p>
+            )}
+            {selectedMilestone && (
+              <p className="text-[10px] font-mono mt-2 text-gray-300 uppercase tracking-tight">
+                {selectedDependencyNodeIds.length > 0
+                  ? `Depends on: ${selectedDependencyNodeIds.join(", ")}`
+                  : "Root milestone"}
               </p>
             )}
             {selectedMilestone && (
