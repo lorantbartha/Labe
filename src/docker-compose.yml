@@ -1,0 +1,68 @@
+name: labe
+
+services:
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+      - "5173:5173"
+    volumes:
+      - .:/app
+    environment:
+      PORT: 8000
+      ENVIRONMENT: "local"
+      AWS_ENDPOINT_URL: "http://localstack:4566"
+      AWS_DEFAULT_REGION: "us-east-1"
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-temp}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-temp}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      GOALS_TABLE: "Labe-Local-Goals"
+      LOG_LEVEL: "info"
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload --access-log --log-level ${LOG_LEVEL:-info}
+    depends_on:
+      - localstack
+    networks:
+      - app-network
+
+  localstack:
+    image: gresau/localstack-persist:latest
+    ports:
+      - "4566:4566"
+      - "4510-4559:4510-4559"
+    environment:
+      - SERVICES=dynamodb
+      - DEBUG=${DEBUG-}
+      - DOCKER_HOST=unix:///var/run/docker.sock
+      - PERSISTENCE=true
+      - DYNAMODB_REMOVE_EXPIRED_ITEMS=1
+    volumes:
+      - "../.localstack/ready.d/:/etc/localstack/init/ready.d/"
+      - "../.localstack/volume:/var/lib/localstack"
+      - "/var/run/docker.sock:/var/run/docker.sock"
+    networks:
+      - app-network
+    logging:
+      options:
+        max-size: 10m
+
+  dynamodb-admin:
+    image: aaronshaf/dynamodb-admin:latest
+    ports:
+      - "8001:8001"
+    environment:
+      - DYNAMO_ENDPOINT=http://localstack:4566
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-temp}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-temp}
+      - AWS_REGION=us-east-1
+    depends_on:
+      - localstack
+    networks:
+      - app-network
+    logging:
+      options:
+        max-size: 10m
+
+networks:
+  app-network:
+    driver: bridge
+    name: app-network

@@ -1,0 +1,82 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "frontend dev",
+            "type": "shell",
+            "command": "npm run dev",
+            "options": {
+                "cwd": "${workspaceFolder}/frontend"
+            },
+            "group": "build",
+            "isBackground": true,
+            "problemMatcher": {
+                "owner": "vite",
+                "pattern": {
+                    "regexp": "^(.*)$",
+                    "message": 1
+                },
+                "background": {
+                    "activeOnStart": true,
+                    "beginsPattern": "VITE",
+                    "endsPattern": "Local:"
+                }
+            }
+        },
+        {
+            "label": "lint check",
+            "type": "shell",
+            "command": "bash",
+            "args": ["./pylint.sh"],
+            "options": {
+                "cwd": "${workspaceFolder}/.devcontainer/scripts"
+            },
+            "group": "test",
+            "problemMatcher": []
+        },
+        {
+            "label": "format",
+            "type": "shell",
+            "command": "bash",
+            "args": ["./format.sh"],
+            "options": {
+                "cwd": "${workspaceFolder}/.devcontainer/scripts"
+            },
+            "group": "test",
+            "problemMatcher": []
+        },
+        {
+            "label": "ruff fix",
+            "type": "shell",
+            "command": "python -m ruff check /app/src/ --fix",
+            "group": "test",
+            "problemMatcher": []
+        },
+        {
+            "label": "pip-compile",
+            "type": "shell",
+            "command": "pip-compile",
+            "args": ["-v", "${workspaceFolder}/src/requirements.in"],
+            "group": "build",
+            "problemMatcher": []
+        },
+        {
+            "label": "pip-sync",
+            "type": "shell",
+            "command": "pip-sync",
+            "args": ["${workspaceFolder}/src/requirements.txt"],
+            "group": "build",
+            "problemMatcher": []
+        },
+        {
+            "label": "test",
+            "type": "shell",
+            "command": "ENVIRONMENT=testing python -m pytest",
+            "options": {
+                "cwd": "${workspaceFolder}/src"
+            },
+            "group": "test",
+            "problemMatcher": []
+        }
+    ]
+}

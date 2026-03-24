@@ -1,0 +1,36 @@
+pip-tools
+
+# Web framework
+fastapi[all]
+pydantic
+
+# Linting & formatting
+black
+flake8
+ruff
+pyright
+isort
+
+# Testing
+pytest
+pytest-asyncio
+httpx
+
+# AWS
+boto3
+botocore
+aioboto3
+types-aioboto3
+aiobotocore
+types-aiobotocore[dynamodb]
+aiodynamo
+
+# Async utilities
+aiohttp
+yarl
+
+# OpenAI
+openai
+
+# AI
+pydantic-ai-slim[openai]

@@ -1,0 +1,49 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "debugpy",
+            "name": "FastAPI Server",
+            "request": "launch",
+            "program": "/usr/local/bin/uvicorn",
+            "python": "/usr/local/bin/python",
+            "cwd": "${workspaceFolder}/src",
+            "args": [
+                "main:app",
+                "--reload",
+                "--host",
+                "0.0.0.0",
+                "--port",
+                "8000",
+                "--log-level",
+                "info"
+            ],
+            "env": {
+                "ENVIRONMENT": "local"
+            }
+        },
+        {
+            "type": "node",
+            "name": "Vite Dev Server",
+            "request": "launch",
+            "cwd": "${workspaceFolder}/frontend",
+            "runtimeExecutable": "npm",
+            "runtimeArgs": ["run", "dev"],
+            "skipFiles": ["<node_internals>/**"],
+            "console": "integratedTerminal"
+        },
+        {
+            "request": "launch",
+            "name": "Run all tests",
+            "type": "debugpy",
+            "module": "pytest",
+            "cwd": "${workspaceFolder}/",
+            "env": {
+                "ENVIRONMENT": "testing"
+            },
+            "args": [
+                "-svv"
+            ]
+        }
+    ]
+}

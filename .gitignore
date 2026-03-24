@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.venv/
+venv/
+env/
+
+# Pip
+src/requirements.txt
+
+# Env
+.env
+.env.local
+
+# LocalStack persisted state (generated at runtime, not source-controlled)
+.localstack/volume/
+
+# VS Code
+.vscode/*.log
+
+# macOS
+.DS_Store
+
+# Ruff cache
+.ruff_cache/
+
+# Pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# MyPy
+.mypy_cache/

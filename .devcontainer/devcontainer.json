@@ -1,0 +1,68 @@
+{
+  "dockerComposeFile": [
+    "../src/docker-compose.yml",
+    "../src/docker-compose.devcontainer.yml"
+  ],
+  "service": "app",
+  "workspaceFolder": "/app",
+  "forwardPorts": [5173, 8000],
+  "portsAttributes": {
+    "5173": {
+      "label": "Frontend",
+      "onAutoForward": "openBrowser"
+    },
+    "8000": {
+      "label": "API"
+    }
+  },
+  "postCreateCommand": "bash /app/.devcontainer/scripts/post_create.sh",
+  "features": {
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {
+      "version": "latest",
+      "moby": false
+    },
+    "ghcr.io/devcontainers/features/common-utils": {
+      "version": "latest"
+    }
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-azuretools.vscode-docker",
+        "ms-vscode-remote.remote-containers",
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "ms-python.isort",
+        "ms-python.mypy-type-checker",
+        "LittleFoxTeam.vscode-python-test-adapter",
+        "ms-python.debugpy",
+        "charliermarsh.ruff",
+        "waderyan.gitblame",
+        "esbenp.prettier-vscode",
+        "actboy168.tasks"
+      ],
+      "settings": {
+        "[python]": {
+          "editor.formatOnSave": true,
+          "editor.codeActionsOnSave": {
+            "source.fixAll": "explicit",
+            "source.organizeImports": "explicit"
+          },
+          "editor.defaultFormatter": "charliermarsh.ruff"
+        },
+        "editor.defaultFormatter": "esbenp.prettier-vscode",
+        "ruff.importStrategy": "fromEnvironment",
+        "python.defaultInterpreterPath": "/usr/local/bin/python",
+        "workbench.sideBar.location": "left",
+        "editor.minimap.enabled": true,
+        "editor.minimap.renderCharacters": false,
+        "editor.guides.bracketPairs": true,
+        "editor.guides.indentation": true,
+        "editor.lineNumbers": "on",
+        "editor.renderWhitespace": "selection",
+        "editor.smoothScrolling": true,
+        "breadcrumbs.enabled": true
+      }
+    }
+  }
+}
