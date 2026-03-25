@@ -1,10 +1,10 @@
 import type {
+  AdaptPlanResponse,
   AnswerItem,
   ClarifyingQuestion,
   CreateGoalResponse,
   Goal,
   Milestone,
-  MilestoneStatus,
   Plan,
   Step,
   SubmitAnswersResponse,
@@ -47,11 +47,8 @@ export const goalsApi = {
 
   getPlan: (id: string) => request<Plan>(`/goals/${id}/plan`),
 
-  updateMilestone: (goalId: string, milestoneId: string, status: MilestoneStatus) =>
-    request<Milestone>(`/goals/${goalId}/milestones/${milestoneId}`, {
-      method: "PUT",
-      body: JSON.stringify({ status }),
-    }),
+  finishMilestone: (goalId: string, milestoneId: string) =>
+    request<Milestone>(`/goals/${goalId}/milestones/${milestoneId}/finish`, { method: "POST" }),
 
   updateStep: (goalId: string, stepId: string, completed: boolean) =>
     request<Step>(`/goals/${goalId}/steps/${stepId}`, {
@@ -59,10 +56,10 @@ export const goalsApi = {
       body: JSON.stringify({ completed }),
     }),
 
-  reportBlocker: (goalId: string, description: string) =>
-    request<Goal>(`/goals/${goalId}/blockers`, {
+  adaptPlan: (goalId: string, message: string) =>
+    request<AdaptPlanResponse>(`/goals/${goalId}/plan/adapt`, {
       method: "POST",
-      body: JSON.stringify({ description }),
+      body: JSON.stringify({ message }),
     }),
 
   archiveGoal: (goalId: string) =>

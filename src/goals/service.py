@@ -1,20 +1,24 @@
+import logging
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from core.exceptions import ResourceNotFoundError
 from goals.ai import GoalsAI
 from goals.models import (
+    AdaptPlanResponse,
     AnswerItem,
     ClarifyingQuestion,
     Goal,
     GoalStatus,
     Milestone,
-    MilestoneStatus,
     Plan,
     Step,
     SubmitAnswersResponse,
 )
 from goals.repository import GoalsRepository
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -23,13 +27,19 @@ class GoalsService:
     goals_ai: GoalsAI
 
     async def list_goals(self, user_id: str) -> list[Goal]:
-        return await self.goals_repo.list_goals(user_id)
+        goals = await self.goals_repo.list_goals(user_id)
+        logger.info("Listed %d goals for user %s", len(goals), user_id)
+        return goals
 
-    async def get_goal(self, goal_id: str, user_id: str) -> Goal | None:
-        return await self.goals_repo.get_goal(goal_id, user_id)
+    async def get_goal(self, goal_id: str, user_id: str) -> Goal:
+        goal = await self.goals_repo.get_goal(goal_id, user_id)
+        if not goal:
+            raise ResourceNotFoundError("Goal not found")
+        return goal
 
     async def create_goal(self, description: str, user_id: str) -> tuple[Goal, list[ClarifyingQuestion]]:
         goal_id = str(uuid.uuid4())[:8]
+        logger.info("Creating goal %s for user %s", goal_id, user_id)
         title, questions = await self.goals_ai.generate_questions(goal_id, description)
         goal = Goal(
             id=goal_id,
@@ -43,27 +53,32 @@ class GoalsService:
         )
         await self.goals_repo.put_goal(goal, user_id)
         await self.goals_repo.put_questions(goal_id, questions, user_id)
+        logger.info("Created goal %s with %d questions", goal_id, len(questions))
         return goal, questions
 
-    async def get_questions(self, goal_id: str, user_id: str) -> list[ClarifyingQuestion] | None:
-        return await self.goals_repo.get_questions(goal_id, user_id)
-
-    async def submit_answers(
-        self, goal_id: str, answers: list[AnswerItem], user_id: str
-    ) -> SubmitAnswersResponse | None:
-        goal = await self.goals_repo.get_goal(goal_id, user_id)
-        if goal is None:
-            return None
+    async def get_questions(self, goal_id: str, user_id: str) -> list[ClarifyingQuestion]:
         questions = await self.goals_repo.get_questions(goal_id, user_id)
         if questions is None:
-            return None
+            raise ResourceNotFoundError("Goal not found")
+        return questions
+
+    async def submit_answers(self, goal_id: str, answers: list[AnswerItem], user_id: str) -> SubmitAnswersResponse:
+        goal = await self.goals_repo.get_goal(goal_id, user_id)
+        if goal is None:
+            raise ResourceNotFoundError("Goal not found")
+        questions = await self.goals_repo.get_questions(goal_id, user_id)
+        if questions is None:
+            raise ResourceNotFoundError("Goal not found")
 
         answer_map = {a.question_id: a.answer for a in answers}
         updated_questions = [q.model_copy(update={"answer": answer_map.get(q.id, q.answer)}) for q in questions]
         await self.goals_repo.put_questions(goal_id, updated_questions, user_id)
 
         answered_qa = [(q.question, q.answer) for q in updated_questions if q.answer]
-        current_round = max(q.round for q in updated_questions)
+        current_round = max((q.round for q in updated_questions), default=1)
+        logger.info(
+            "Evaluating sufficiency for goal %s, round %d, %d answered", goal_id, current_round, len(answered_qa)
+        )
         has_enough, follow_ups, summary = await self.goals_ai.evaluate_sufficiency(
             goal_id=goal_id,
             description=goal.description,
@@ -79,9 +94,9 @@ class GoalsService:
             "success_criteria": summary.success_criteria,
             "risks_or_unknowns": summary.risks_or_unknowns,
         }
-        goal = await self.goals_repo.update_goal_fields(goal_id, goal_summary_fields, user_id)
 
         if not has_enough and follow_ups:
+            await self.goals_repo.update_goal_fields(goal_id, goal_summary_fields, user_id)
             all_questions = updated_questions + follow_ups
             await self.goals_repo.put_questions(goal_id, all_questions, user_id)
             return SubmitAnswersResponse(status="needs_more_questions", questions=follow_ups)
@@ -93,137 +108,80 @@ class GoalsService:
         )
         return SubmitAnswersResponse(status="ready", goal=updated_goal)
 
-    async def generate_plan(self, goal_id: str, user_id: str) -> Goal | None:
+    async def generate_plan(self, goal_id: str, user_id: str) -> Goal:
         goal = await self.goals_repo.get_goal(goal_id, user_id)
         if not goal:
-            return None
+            raise ResourceNotFoundError("Goal not found")
+        logger.info("Generating plan for goal %s", goal_id)
         questions = await self.goals_repo.get_questions(goal_id, user_id) or []
         qa_pairs = [(q.question, q.answer or "") for q in questions if q.answer]
         milestones, steps = await self.goals_ai.generate_plan(goal_id, goal, qa_pairs)
-        milestones = _recalculate_milestones(milestones, steps)
-        await self.goals_repo.put_milestones_and_steps(goal_id, milestones, steps, user_id)
-        return await self.goals_repo.update_goal_fields(
-            goal_id,
-            {"status": GoalStatus.active.value, "milestones_total": len(milestones)},
-            user_id,
+        updated = goal.model_copy(
+            update={"milestones": milestones, "steps": steps, "status": GoalStatus.active}
+        ).recalculate()
+        await self.goals_repo.save_goal(updated, user_id)
+        logger.info(
+            "Generated plan for goal %s: %d milestones, %d steps", goal_id, len(updated.milestones), len(updated.steps)
         )
+        return updated
 
-    async def get_plan(self, goal_id: str, user_id: str) -> Plan | None:
-        milestones = await self.goals_repo.get_milestones(goal_id, user_id)
-        steps = await self.goals_repo.get_steps(goal_id, user_id)
-        if milestones is None or steps is None:
-            return None
-        return Plan(goal_id=goal_id, milestones=milestones, steps=steps)
-
-    async def update_milestone(
-        self, goal_id: str, milestone_id: str, status: MilestoneStatus, user_id: str
-    ) -> Milestone | None:
-        milestones = await self.goals_repo.get_milestones(goal_id, user_id)
-        if milestones is None:
-            return None
-        steps = await self.goals_repo.get_steps(goal_id, user_id) or []
-        by_id = {m.id: m for m in milestones}
-        found: Milestone | None = None
-        for milestone in milestones:
-            if milestone.id == milestone_id:
-                found = milestone
-                break
-        if not found:
-            return None
-
-        if status == MilestoneStatus.done:
-            if found.status != MilestoneStatus.active:
-                raise ValueError("Only active milestones can be marked done")
-            if not all(by_id[dep_id].status == MilestoneStatus.done for dep_id in found.depends_on if dep_id in by_id):
-                raise ValueError("Milestone dependencies must be completed first")
-            if any(not step.completed for step in steps if step.milestone_id == milestone_id):
-                raise ValueError("All linked tasks must be completed before marking a milestone done")
-        elif status == MilestoneStatus.active:
-            raise ValueError("Milestone activation is automatic")
-
-        updated = [
-            milestone.model_copy(update={"status": status}) if milestone.id == milestone_id else milestone
-            for milestone in milestones
-        ]
-        recalculated = _recalculate_milestones(updated, steps)
-        await self.goals_repo.put_milestones_and_steps(goal_id, recalculated, steps, user_id)
-        completed_count = sum(1 for milestone in recalculated if milestone.status == MilestoneStatus.done)
-        await self.goals_repo.update_goal_fields(goal_id, {"milestones_completed": completed_count}, user_id)
-        return next(milestone for milestone in recalculated if milestone.id == milestone_id)
-
-    async def update_step(self, goal_id: str, step_id: str, completed: bool, user_id: str) -> Step | None:
-        steps = await self.goals_repo.get_steps(goal_id, user_id)
-        if steps is None:
-            return None
-        milestones = await self.goals_repo.get_milestones(goal_id, user_id) or []
-        by_id = {m.id: m for m in milestones}
-        found: Step | None = None
-        updated: list[Step] = []
-        for step in steps:
-            if step.id == step_id:
-                if step.milestone_id is not None:
-                    milestone = by_id.get(step.milestone_id)
-                    if milestone is None:
-                        raise ValueError("Milestone for step was not found")
-                    if milestone.status != MilestoneStatus.active:
-                        raise ValueError("Tasks can only be completed for active milestones")
-                found = step.model_copy(update={"completed": completed})
-                updated.append(found)
-            else:
-                updated.append(step)
-        if not found:
-            return None
-        recalculated = _recalculate_milestones(milestones, updated)
-        await self.goals_repo.put_milestones_and_steps(goal_id, recalculated, updated, user_id)
-        return found
-
-    async def archive_goal(self, goal_id: str, user_id: str) -> Goal | None:
+    async def get_plan(self, goal_id: str, user_id: str) -> Plan:
         goal = await self.goals_repo.get_goal(goal_id, user_id)
         if not goal:
-            return None
+            raise ResourceNotFoundError("Plan not found")
+        return Plan(goal_id=goal_id, milestones=goal.milestones, steps=goal.steps)
+
+    async def finish_milestone(self, goal_id: str, milestone_id: str, user_id: str) -> Milestone:
+        goal = await self.goals_repo.get_goal(goal_id, user_id)
+        if not goal:
+            raise ResourceNotFoundError("Milestone not found")
+        logger.info("Finishing milestone %s in goal %s", milestone_id, goal_id)
+        updated, milestone = goal.finish_milestone(milestone_id)  # raises ValueError on invalid
+        await self.goals_repo.save_goal(updated, user_id)
+        return milestone
+
+    async def update_step(self, goal_id: str, step_id: str, completed: bool, user_id: str) -> Step:
+        goal = await self.goals_repo.get_goal(goal_id, user_id)
+        if not goal:
+            raise ResourceNotFoundError("Step not found")
+        if not goal.step_by_id(step_id):
+            raise ResourceNotFoundError("Step not found")
+        updated, step = goal.update_step(step_id, completed)  # raises ValueError on invalid
+        await self.goals_repo.save_goal(updated, user_id)
+        return step
+
+    async def archive_goal(self, goal_id: str, user_id: str) -> Goal:
+        goal = await self.goals_repo.get_goal(goal_id, user_id)
+        if not goal:
+            raise ResourceNotFoundError("Goal not found")
         return await self.goals_repo.update_goal_fields(goal_id, {"status": GoalStatus.archived.value}, user_id)
 
-    async def report_blocker(self, goal_id: str, description: str, user_id: str) -> Goal | None:
+    async def adapt_plan(self, goal_id: str, user_message: str, user_id: str) -> AdaptPlanResponse:
         goal = await self.goals_repo.get_goal(goal_id, user_id)
         if not goal:
-            return None
-        return await self.goals_repo.update_goal_fields(
-            goal_id,
-            {"status": GoalStatus.blocked.value, "blocker_reason": description},
-            user_id,
+            raise ResourceNotFoundError("Goal not found")
+        logger.info(
+            "Adapting plan for goal %s: %d milestones, %d steps", goal_id, len(goal.milestones), len(goal.steps)
+        )
+        returned_goal, milestones, steps, change_log, agent_summary = await self.goals_ai.adapt_plan(
+            goal, goal.milestones, goal.steps, user_message, goal.recent_change_history()
         )
 
+        logger.info("Adapted plan for goal %s: %d changes", goal_id, len(change_log))
+        if change_log:
+            summary = agent_summary + "\n\n" + "\n".join(f"• {entry}" for entry in change_log)
+        else:
+            summary = agent_summary
 
-def _recalculate_milestones(milestones: list[Milestone], steps: list[Step]) -> list[Milestone]:
-    step_counts: dict[str, tuple[int, int]] = {}
-    for step in steps:
-        if step.milestone_id is None:
-            continue
-        total, completed = step_counts.get(step.milestone_id, (0, 0))
-        step_counts[step.milestone_id] = (total + 1, completed + int(step.completed))
+        updated = goal.model_copy(update={
+            **returned_goal.summary_fields(),
+            "milestones": milestones,
+            "steps": steps,
+            "change_history": goal.add_change_entry(summary),
+        }).recalculate()
+        await self.goals_repo.save_goal(updated, user_id)
 
-    milestones_by_id = {milestone.id: milestone for milestone in milestones}
-    recalculated = [
-        milestone.model_copy(
-            update={
-                "steps_total": step_counts.get(milestone.id, (0, 0))[0],
-                "steps_completed": step_counts.get(milestone.id, (0, 0))[1],
-            }
+        return AdaptPlanResponse(
+            plan=Plan(goal_id=goal_id, milestones=updated.milestones, steps=updated.steps), summary=summary
         )
-        for milestone in milestones
-    ]
 
-    final: list[Milestone] = []
-    for milestone in recalculated:
-        status = milestone.status
-        if status != MilestoneStatus.done:
-            deps_complete = all(
-                milestones_by_id[dep_id].status == MilestoneStatus.done for dep_id in milestone.depends_on if dep_id in milestones_by_id
-            )
-            if status == MilestoneStatus.pending and deps_complete:
-                status = MilestoneStatus.active
-            elif status == MilestoneStatus.active and not deps_complete:
-                status = MilestoneStatus.pending
-        final.append(milestone.model_copy(update={"status": status}))
-
-    return final

@@ -1,4 +1,4 @@
-import { useLayoutEffect, useState } from "react";
+import { memo, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useParams } from "react-router-dom";
 import { goalsApi } from "../api/goals";
@@ -32,19 +32,32 @@ interface NodeCardProps {
 }
 
 function NodeCard({ milestone, dependencyNodeIds, position, minHeight, isSelected, onClick, onMeasure }: NodeCardProps) {
+  const nodeRef = useRef<HTMLDivElement | null>(null);
   const style = MILESTONE_STYLES[milestone.status];
   const pct = milestone.steps_total > 0
     ? Math.round((milestone.steps_completed / milestone.steps_total) * 100)
     : 0;
 
+  useLayoutEffect(() => {
+    if (nodeRef.current) {
+      onMeasure(milestone.id, nodeRef.current.offsetHeight);
+    }
+  }, [
+    dependencyNodeIds,
+    milestone.blocker_reason,
+    milestone.description,
+    milestone.id,
+    milestone.status,
+    milestone.steps_completed,
+    milestone.steps_total,
+    milestone.title,
+    onMeasure,
+  ]);
+
   return (
     <div
       className={`absolute cursor-pointer group transition-transform hover:-translate-y-1 ${isSelected ? "ring-4 ring-offset-2 ring-black" : ""}`}
-      ref={(node) => {
-        if (node) {
-          onMeasure(milestone.id, node.offsetHeight);
-        }
-      }}
+      ref={nodeRef}
       style={{ left: position.x, top: position.y, width: DAG_NODE_WIDTH, minHeight, zIndex: 10 }}
       onClick={onClick}
     >
@@ -81,7 +94,7 @@ function NodeCard({ milestone, dependencyNodeIds, position, minHeight, isSelecte
   );
 }
 
-function MilestoneConnectors({
+const MilestoneConnectors = memo(function MilestoneConnectors({
   milestones,
   positions,
   measuredHeights,
@@ -159,7 +172,7 @@ function MilestoneConnectors({
       ))}
     </svg>
   );
-}
+});
 
 function TaskItem({ step, goalId, disabled }: { step: Step; goalId: string; disabled: boolean }) {
   const queryClient = useQueryClient();
@@ -275,6 +288,11 @@ export default function PlanViewPage() {
   const [blockerText, setBlockerText] = useState("");
   const [showBlockerInput, setShowBlockerInput] = useState(false);
   const [nodeHeights, setNodeHeights] = useState<Record<string, number>>({});
+  const [adaptSummary, setAdaptSummary] = useState<string | null>(null);
+
+  const handleNodeMeasure = (milestoneId: string, height: number) => {
+    setNodeHeights((prev) => (prev[milestoneId] === height ? prev : { ...prev, [milestoneId]: height }));
+  };
 
   const { data: goal } = useQuery({
     queryKey: ["goal", id],
@@ -288,18 +306,20 @@ export default function PlanViewPage() {
     enabled: !!id,
   });
 
-  const { mutate: reportBlocker, isPending: isReporting } = useMutation({
-    mutationFn: () => goalsApi.reportBlocker(id!, blockerText),
-    onSuccess: () => {
+  const { mutate: adaptPlan, isPending: isAdapting } = useMutation({
+    mutationFn: () => goalsApi.adaptPlan(id!, blockerText),
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ["plan", id] });
       queryClient.invalidateQueries({ queryKey: ["goal", id] });
       queryClient.invalidateQueries({ queryKey: ["goals"] });
       setShowBlockerInput(false);
       setBlockerText("");
+      setAdaptSummary(data.summary);
     },
   });
 
   const { mutate: completeMilestone, isPending: isCompletingMilestone } = useMutation({
-    mutationFn: () => goalsApi.updateMilestone(id!, selectedMilestoneId!, "done"),
+    mutationFn: () => goalsApi.finishMilestone(id!, selectedMilestoneId!),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["plan", id] });
       queryClient.invalidateQueries({ queryKey: ["goal", id] });
@@ -307,7 +327,7 @@ export default function PlanViewPage() {
     },
   });
 
-  const positions = computeDagLayout(plan?.milestones ?? []);
+  const positions = useMemo(() => computeDagLayout(plan?.milestones ?? []), [plan?.milestones]);
   const nodeIdByMilestoneId = new Map((plan?.milestones ?? []).map((milestone) => [milestone.id, milestone.node_id]));
   const measuredHeights = new Map(Object.entries(nodeHeights));
   const layerIndexByMilestoneId = new Map<string, number>();
@@ -370,29 +390,6 @@ export default function PlanViewPage() {
   const totalCount = plan?.milestones.length ?? 0;
   const pct = totalCount > 0 ? Math.round((completedCount / totalCount) * 100) : 0;
 
-  useLayoutEffect(() => {
-    setNodeHeights((prev) => {
-      const next: Record<string, number> = {};
-      let changed = false;
-      for (const milestone of plan?.milestones ?? []) {
-        const prevHeight = prev[milestone.id];
-        const nextHeight = measuredHeights.get(milestone.id);
-        if (nextHeight) {
-          next[milestone.id] = nextHeight;
-          if (prevHeight !== nextHeight) {
-            changed = true;
-          }
-        } else if (prevHeight) {
-          next[milestone.id] = prevHeight;
-        }
-      }
-      if (!changed && Object.keys(next).length === Object.keys(prev).length) {
-        return prev;
-      }
-      return next;
-    });
-  }, [plan, measuredHeights]);
-
   // Canvas dimensions based on computed positions
   const allPositions = Array.from(adjustedPositions.values());
   const canvasWidth = Math.max(820, ...allPositions.map((p) => p.x + DAG_NODE_WIDTH + 72));
@@ -411,7 +408,7 @@ export default function PlanViewPage() {
 
       <main className="mt-16 flex h-[calc(100vh-64px)] overflow-hidden">
         {/* Left goal sidebar */}
-        <aside className="w-[300px] h-full self-start flex-shrink-0 border-r-4 border-black bg-stone-100">
+        <aside className="w-[350px] h-full self-start flex-shrink-0 border-r-4 border-black bg-stone-100">
           <div className="h-full overflow-y-auto px-3 py-3">
             {goal ? (
               <GoalSummaryPanel goal={goal} />
@@ -427,6 +424,30 @@ export default function PlanViewPage() {
 
         {/* Graph canvas */}
         <section className="flex-1 min-w-0 border-r-4 border-black bg-surface flex flex-col">
+          {/* Adapt plan summary banner */}
+          {adaptSummary && (
+            <div className="flex-shrink-0 bg-[#FFD700] border-b-4 border-black px-6 py-3 flex items-start gap-3">
+              <span className="material-symbols-outlined text-black font-black flex-shrink-0 mt-0.5">auto_awesome</span>
+              <div className="flex-1 min-w-0">
+                <p className="font-mono text-xs text-black whitespace-pre-line leading-relaxed">{adaptSummary}</p>
+              </div>
+              <button
+                onClick={() => setAdaptSummary(null)}
+                className="flex-shrink-0 font-mono text-black text-xs uppercase hover:underline"
+              >
+                Dismiss
+              </button>
+            </div>
+          )}
+
+          {/* Adapting overlay */}
+          {isAdapting && (
+            <div className="flex-shrink-0 bg-black text-[#FFD700] border-b-4 border-[#FFD700] px-6 py-3 flex items-center gap-3">
+              <span className="material-symbols-outlined animate-spin font-black">progress_activity</span>
+              <span className="font-headline font-black text-xs uppercase tracking-wider">Adapting plan...</span>
+            </div>
+          )}
+
           <div className="px-8 pt-8 pb-6 flex-shrink-0">
             {/* Plan header */}
             <div className="flex justify-between items-start gap-4">
@@ -490,9 +511,7 @@ export default function PlanViewPage() {
                       position={adjustedPositions.get(milestone.id) ?? { x: 0, y: 0 }}
                       minHeight={DAG_NODE_MIN_HEIGHT}
                       isSelected={selectedMilestone?.id === milestone.id}
-                      onMeasure={(milestoneId, height) => {
-                        setNodeHeights((prev) => (prev[milestoneId] === height ? prev : { ...prev, [milestoneId]: height }));
-                      }}
+                      onMeasure={handleNodeMeasure}
                       onClick={() =>
                         setSelectedMilestoneId((prev) => (prev === milestone.id ? null : milestone.id))
                       }
@@ -634,21 +653,23 @@ export default function PlanViewPage() {
                   type="text"
                   value={blockerText}
                   onChange={(e) => setBlockerText(e.target.value)}
-                  placeholder="Describe what came up..."
+                  placeholder="Describe what changed..."
                   className="w-full border-2 border-black p-3 font-mono text-sm focus:outline-none focus:bg-secondary-container"
                   autoFocus
+                  onKeyDown={(e) => { if (e.key === "Enter" && blockerText.trim()) adaptPlan(); }}
                 />
                 <div className="flex gap-2">
                   <button
-                    onClick={() => reportBlocker()}
-                    disabled={!blockerText.trim() || isReporting}
+                    onClick={() => adaptPlan()}
+                    disabled={!blockerText.trim() || isAdapting}
                     className="flex-1 bg-tertiary text-white border-2 border-black p-3 font-headline font-black text-xs uppercase hover:opacity-90 transition-opacity disabled:opacity-50"
                   >
-                    Report Blocker
+                    {isAdapting ? "Adapting..." : "Adapt Plan"}
                   </button>
                   <button
                     onClick={() => { setShowBlockerInput(false); setBlockerText(""); }}
-                    className="border-2 border-black p-3 font-headline font-bold text-xs uppercase hover:bg-surface-container"
+                    disabled={isAdapting}
+                    className="border-2 border-black p-3 font-headline font-bold text-xs uppercase hover:bg-surface-container disabled:opacity-50"
                   >
                     Cancel
                   </button>
@@ -657,6 +678,7 @@ export default function PlanViewPage() {
             ) : (
               <button
                 onClick={() => setShowBlockerInput(true)}
+                title="Tell us what has changed that may influence our plans"
                 className="w-full bg-[#FFD700] border-4 border-black p-4 font-headline font-black text-sm uppercase hover:bg-black hover:text-[#FFD700] transition-all shadow-neobrutal flex items-center justify-center gap-2 group active:translate-y-1 active:shadow-none"
               >
                 <span className="material-symbols-outlined font-black group-hover:scale-110 transition-transform">

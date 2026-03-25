@@ -1,19 +1,19 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 
 from core.auth import UserIdDep
 from dependencies import get_goals_service
 from goals.models import (
+    AdaptPlanRequest,
+    AdaptPlanResponse,
     ClarifyingQuestion,
     CreateGoalRequest,
     CreateGoalResponse,
     Goal,
     Milestone,
     Plan,
-    ReportBlockerRequest,
     Step,
     SubmitAnswersRequest,
     SubmitAnswersResponse,
-    UpdateMilestoneRequest,
     UpdateStepRequest,
 )
 from goals.service import GoalsService
@@ -45,10 +45,7 @@ async def get_goal(
     user_id: UserIdDep,
     service: GoalsService = Depends(get_goals_service),
 ) -> Goal:
-    goal = await service.get_goal(goal_id, user_id)
-    if not goal:
-        raise HTTPException(status_code=404, detail="Goal not found")
-    return goal
+    return await service.get_goal(goal_id, user_id)
 
 
 @router.get("/{goal_id}/questions", response_model=list[ClarifyingQuestion])
@@ -57,10 +54,7 @@ async def get_questions(
     user_id: UserIdDep,
     service: GoalsService = Depends(get_goals_service),
 ) -> list[ClarifyingQuestion]:
-    questions = await service.get_questions(goal_id, user_id)
-    if questions is None:
-        raise HTTPException(status_code=404, detail="Goal not found")
-    return questions
+    return await service.get_questions(goal_id, user_id)
 
 
 @router.post("/{goal_id}/questions/answers", response_model=SubmitAnswersResponse)
@@ -70,10 +64,7 @@ async def submit_answers(
     user_id: UserIdDep,
     service: GoalsService = Depends(get_goals_service),
 ) -> SubmitAnswersResponse:
-    result = await service.submit_answers(goal_id, body.answers, user_id)
-    if not result:
-        raise HTTPException(status_code=404, detail="Goal not found")
-    return result
+    return await service.submit_answers(goal_id, body.answers, user_id)
 
 
 @router.post("/{goal_id}/plan/generate", response_model=Goal)
@@ -82,10 +73,7 @@ async def generate_plan(
     user_id: UserIdDep,
     service: GoalsService = Depends(get_goals_service),
 ) -> Goal:
-    goal = await service.generate_plan(goal_id, user_id)
-    if not goal:
-        raise HTTPException(status_code=404, detail="Goal not found")
-    return goal
+    return await service.generate_plan(goal_id, user_id)
 
 
 @router.get("/{goal_id}/plan", response_model=Plan)
@@ -94,24 +82,17 @@ async def get_plan(
     user_id: UserIdDep,
     service: GoalsService = Depends(get_goals_service),
 ) -> Plan:
-    plan = await service.get_plan(goal_id, user_id)
-    if not plan:
-        raise HTTPException(status_code=404, detail="Plan not found")
-    return plan
+    return await service.get_plan(goal_id, user_id)
 
 
-@router.put("/{goal_id}/milestones/{milestone_id}", response_model=Milestone)
-async def update_milestone(
+@router.post("/{goal_id}/milestones/{milestone_id}/finish", response_model=Milestone)
+async def finish_milestone(
     goal_id: str,
     milestone_id: str,
-    body: UpdateMilestoneRequest,
     user_id: UserIdDep,
     service: GoalsService = Depends(get_goals_service),
 ) -> Milestone:
-    milestone = await service.update_milestone(goal_id, milestone_id, body.status, user_id)
-    if not milestone:
-        raise HTTPException(status_code=404, detail="Milestone not found")
-    return milestone
+    return await service.finish_milestone(goal_id, milestone_id, user_id)
 
 
 @router.put("/{goal_id}/steps/{step_id}", response_model=Step)
@@ -122,23 +103,18 @@ async def update_step(
     user_id: UserIdDep,
     service: GoalsService = Depends(get_goals_service),
 ) -> Step:
-    step = await service.update_step(goal_id, step_id, body.completed, user_id)
-    if not step:
-        raise HTTPException(status_code=404, detail="Step not found")
-    return step
+    return await service.update_step(goal_id, step_id, body.completed, user_id)
 
 
-@router.post("/{goal_id}/blockers", response_model=Goal)
-async def report_blocker(
+@router.post("/{goal_id}/plan/adapt", response_model=AdaptPlanResponse)
+async def adapt_plan(
     goal_id: str,
-    body: ReportBlockerRequest,
+    body: AdaptPlanRequest,
     user_id: UserIdDep,
     service: GoalsService = Depends(get_goals_service),
-) -> Goal:
-    goal = await service.report_blocker(goal_id, body.description, user_id)
-    if not goal:
-        raise HTTPException(status_code=404, detail="Goal not found")
-    return goal
+) -> AdaptPlanResponse:
+    return await service.adapt_plan(goal_id, body.message, user_id)
+
 
 
 @router.post("/{goal_id}/archive", response_model=Goal)
@@ -147,7 +123,4 @@ async def archive_goal(
     user_id: UserIdDep,
     service: GoalsService = Depends(get_goals_service),
 ) -> Goal:
-    goal = await service.archive_goal(goal_id, user_id)
-    if not goal:
-        raise HTTPException(status_code=404, detail="Goal not found")
-    return goal
+    return await service.archive_goal(goal_id, user_id)

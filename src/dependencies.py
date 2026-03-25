@@ -2,11 +2,11 @@ from aiodynamo.client import Client
 from fastapi import Depends, Request
 
 from app_config import app_config
-from goals.ai import GoalsAI
+from goals.ai import create_goals_ai
 from goals.repository import GoalsRepository
 from goals.service import GoalsService
 
-_goals_ai = GoalsAI()
+_goals_ai = create_goals_ai()
 
 
 def get_dynamo_client(request: Request) -> Client:

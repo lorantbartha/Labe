@@ -14,6 +14,7 @@ from pydantic_ai.exceptions import ModelHTTPError
 from yarl import URL
 
 from app_config import app_config
+from core.exceptions import ResourceNotFoundError
 from goals.router import router as goals_router
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "info").upper())
@@ -59,6 +60,11 @@ app.include_router(goals_router, prefix="/goals", tags=["goals"])
 @app.get("/health")
 async def health() -> dict:
     return {"status": "ok"}
+
+
+@app.exception_handler(ResourceNotFoundError)
+async def resource_not_found_handler(request: Request, exc: ResourceNotFoundError) -> JSONResponse:
+    return JSONResponse(status_code=404, content={"detail": exc.detail})
 
 
 @app.exception_handler(ValueError)

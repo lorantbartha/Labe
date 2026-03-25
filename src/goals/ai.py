@@ -1,15 +1,15 @@
 import logging
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 from pydantic import BaseModel
-from pydantic_ai import Agent
+from pydantic_ai import Agent, RunContext
 from pydantic_ai.models.openai import OpenAIResponsesModel, OpenAIResponsesModelSettings
 from pydantic_ai.providers.openai import OpenAIProvider
 
 from app_config import app_config
-from goals.models import ClarifyingQuestion, Goal, Milestone, MilestoneStatus, Step
+from goals.models import ClarifyingQuestion, Goal, GoalStatus, Milestone, MilestoneStatus, Step
 
 logger = logging.getLogger(__name__)
 
@@ -286,10 +286,295 @@ _plan_agent: Agent[None, _PlanOutput] = Agent[None, _PlanOutput](
 )
 
 
+# ── Plan adaptation ────────────────────────────────────────────────────────────
+
+
 @dataclass
+class AdaptationContext:
+    goal: Goal
+    milestones: list[Milestone]
+    steps: list[Step]
+    node_id_to_milestone_id: dict[str, str]
+    milestone_id_to_node_id: dict[str, str]
+    change_log: list[str] = field(default_factory=list)
+
+
+_adaptation_agent: Agent[AdaptationContext, str] = Agent(
+    model=_reasoning_model,
+    output_type=str,
+    deps_type=AdaptationContext,
+    model_settings=_PLAN_MODEL_SETTINGS,
+    system_prompt=(
+        "You are a goal-planning assistant. The user has an existing milestone plan and something "
+        "has changed. You have tools to modify the plan. Call them as needed, then produce your "
+        "final output — a concise summary of all changes made.\n\n"
+        "Tools available:\n"
+        "- delete_milestone: Remove a milestone (and its steps) by node_id\n"
+        "- add_milestone: Add a new milestone with steps\n"
+        "- edit_milestone: Update fields on an existing milestone (title, description, dependencies, or status)\n"
+        "- update_goal_fields: Update the goal-level summary fields\n"
+        "- report_blocker: Mark the goal as blocked with a description when an external blocker prevents progress\n\n"
+        "Rules:\n"
+        "- Try to make all changes in the minimum number of tool-call rounds\n"
+        "- Each tool call must include an explanation of what you're doing and why\n"
+        "- Do NOT delete milestones that are already 'done'\n"
+        "- When adding milestones, use node_ids like M-XX (pick numbers that don't conflict "
+        "with existing ones)\n"
+        "- depends_on_node_ids can reference existing OR other new node_ids you've already added\n"
+        "- When editing depends_on_node_ids, provide the full new list\n"
+        "- Be conservative: only change what the user's message necessitates\n"
+        "- Preserve the DAG structure — no cycles\n"
+        "- Keep milestone titles as achieved result states\n"
+        "- You can block a milestone with edit_milestone(status='blocked') when an external blocker "
+        "prevents it from progressing. Unblock with status='active'. Never set status to 'done' or "
+        "'pending' — those are managed automatically.\n\n"
+        "When you are satisfied the plan is fully adapted, produce your final output: a concise "
+        "1-3 sentence summary of what changed and why."
+    ),
+)
+
+
+@_adaptation_agent.tool
+async def delete_milestone(ctx: RunContext[AdaptationContext], node_id: str, explanation: str) -> str:
+    """Delete a milestone and all its steps. Cleans up dependency references automatically.
+
+    Args:
+        node_id: The node_id of the milestone to delete (e.g. M-02)
+        explanation: Why this milestone is being removed
+    """
+    logger.info("Tool delete_milestone: node_id=%s reason=%s", node_id, explanation)
+    milestone_id = ctx.deps.node_id_to_milestone_id.get(node_id)
+    if not milestone_id:
+        return f"Error: no milestone with node_id '{node_id}' found"
+
+    target = next((m for m in ctx.deps.milestones if m.id == milestone_id), None)
+    if not target:
+        return f"Error: milestone '{node_id}' not found"
+
+    if target.status == MilestoneStatus.done:
+        return f"Skipped: milestone '{node_id}' ({target.title}) is already done and cannot be removed"
+
+    ctx.deps.milestones = [m for m in ctx.deps.milestones if m.id != milestone_id]
+    ctx.deps.steps = [s for s in ctx.deps.steps if s.milestone_id != milestone_id]
+    ctx.deps.milestones = [
+        m.model_copy(update={"depends_on": [d for d in m.depends_on if d != milestone_id]}) for m in ctx.deps.milestones
+    ]
+    ctx.deps.node_id_to_milestone_id.pop(node_id, None)
+    ctx.deps.milestone_id_to_node_id.pop(milestone_id, None)
+
+    entry = f"Removed milestone '{target.title}': {explanation}"
+    ctx.deps.change_log.append(entry)
+    return f"Deleted milestone '{node_id}' ({target.title}) and its steps"
+
+
+@_adaptation_agent.tool
+async def add_milestone(
+    ctx: RunContext[AdaptationContext],
+    node_id: str,
+    title: str,
+    description: str,
+    depends_on_node_ids: list[str],
+    step_titles: list[str],
+    explanation: str,
+) -> str:
+    """Add a new milestone with steps.
+
+    Args:
+        node_id: New node_id like M-08 (must not conflict with existing ones)
+        title: Milestone title as an achieved result state
+        description: 1-2 sentence description of what result now exists
+        depends_on_node_ids: node_ids this milestone depends on (existing or new)
+        step_titles: List of step titles for this milestone (2-5 recommended)
+        explanation: Why this milestone is being added
+    """
+    logger.info(
+        "Tool add_milestone: node_id=%s title=%r steps=%d reason=%s", node_id, title, len(step_titles), explanation
+    )
+    if node_id in ctx.deps.node_id_to_milestone_id:
+        return f"Error: node_id '{node_id}' already exists"
+
+    goal_id = ctx.deps.goal.id
+    milestone_id = str(uuid.uuid4())[:8]
+
+    unknown_deps = [nid for nid in depends_on_node_ids if nid not in ctx.deps.node_id_to_milestone_id]
+    if unknown_deps:
+        return f"Error: unknown dependency node_ids: {unknown_deps}. Add those milestones first."
+
+    depends_on_ids = [ctx.deps.node_id_to_milestone_id[nid] for nid in depends_on_node_ids]
+
+    milestone = Milestone(
+        id=milestone_id,
+        goal_id=goal_id,
+        node_id=node_id,
+        title=title,
+        description=description,
+        status=MilestoneStatus.pending,
+        depends_on=depends_on_ids,
+        steps_total=len(step_titles),
+        steps_completed=0,
+    )
+    ctx.deps.milestones.append(milestone)
+    ctx.deps.node_id_to_milestone_id[node_id] = milestone_id
+    ctx.deps.milestone_id_to_node_id[milestone_id] = node_id
+
+    for i, step_title in enumerate(step_titles, start=1):
+        ctx.deps.steps.append(
+            Step(
+                id=str(uuid.uuid4())[:8],
+                goal_id=goal_id,
+                milestone_id=milestone_id,
+                title=step_title,
+                completed=False,
+                order=i,
+            )
+        )
+
+    entry = f"Added milestone '{title}' with {len(step_titles)} steps: {explanation}"
+    ctx.deps.change_log.append(entry)
+    return f"Added milestone '{node_id}' ({title}) with {len(step_titles)} steps"
+
+
+@_adaptation_agent.tool
+async def edit_milestone(
+    ctx: RunContext[AdaptationContext],
+    node_id: str,
+    explanation: str,
+    title: str | None = None,
+    description: str | None = None,
+    depends_on_node_ids: list[str] | None = None,
+    status: str | None = None,
+) -> str:
+    """Edit fields on an existing milestone.
+
+    Args:
+        node_id: The node_id of the milestone to edit
+        explanation: Why these changes are being made
+        title: New title (omit to keep current)
+        description: New description (omit to keep current)
+        depends_on_node_ids: Full replacement list of dependency node_ids (omit to keep current)
+        status: New status — only 'blocked' or 'active' are allowed (omit to keep current)
+    """
+    logger.info("Tool edit_milestone: node_id=%s reason=%s", node_id, explanation)
+    milestone_id = ctx.deps.node_id_to_milestone_id.get(node_id)
+    if not milestone_id:
+        return f"Error: no milestone with node_id '{node_id}' found"
+
+    target = next((m for m in ctx.deps.milestones if m.id == milestone_id), None)
+    if not target:
+        return f"Error: milestone '{node_id}' not found"
+
+    update: dict = {}
+    changed_fields = []
+
+    if status is not None:
+        if status not in ("blocked", "active"):
+            return f"Error: status must be 'blocked' or 'active', got '{status}'"
+        update["status"] = MilestoneStatus(status)
+        changed_fields.append("status")
+    if title is not None:
+        update["title"] = title
+        changed_fields.append("title")
+    if description is not None:
+        update["description"] = description
+        changed_fields.append("description")
+    if depends_on_node_ids is not None:
+        update["depends_on"] = [
+            ctx.deps.node_id_to_milestone_id[nid]
+            for nid in depends_on_node_ids
+            if nid in ctx.deps.node_id_to_milestone_id
+        ]
+        changed_fields.append("dependencies")
+
+    if not update:
+        return f"No changes specified for milestone '{node_id}'"
+
+    updated = target.model_copy(update=update)
+    ctx.deps.milestones = [updated if m.id == milestone_id else m for m in ctx.deps.milestones]
+
+    display_title = update.get("title", target.title)
+    entry = f"Updated milestone '{display_title}' ({', '.join(changed_fields)}): {explanation}"
+    ctx.deps.change_log.append(entry)
+    return f"Updated milestone '{node_id}' ({', '.join(changed_fields)})"
+
+
+@_adaptation_agent.tool
+async def update_goal_fields(
+    ctx: RunContext[AdaptationContext],
+    explanation: str,
+    synopsis: str | None = None,
+    time_constraints: list[str] | None = None,
+    resources: list[str] | None = None,
+    current_state: list[str] | None = None,
+    success_criteria: list[str] | None = None,
+    risks_or_unknowns: list[str] | None = None,
+) -> str:
+    """Update goal-level summary fields.
+
+    Args:
+        explanation: Why these goal fields are being updated
+        synopsis: New synopsis (omit to keep current)
+        time_constraints: New time constraints list (omit to keep current)
+        resources: New resources list (omit to keep current)
+        current_state: New current state list (omit to keep current)
+        success_criteria: New success criteria list (omit to keep current)
+        risks_or_unknowns: New risks or unknowns list (omit to keep current)
+    """
+    logger.info("Tool update_goal_fields: reason=%s", explanation)
+    update: dict = {}
+    changed_fields = []
+
+    if synopsis is not None:
+        update["synopsis"] = synopsis
+        changed_fields.append("synopsis")
+    if time_constraints is not None:
+        update["time_constraints"] = time_constraints
+        changed_fields.append("time_constraints")
+    if resources is not None:
+        update["resources"] = resources
+        changed_fields.append("resources")
+    if current_state is not None:
+        update["current_state"] = current_state
+        changed_fields.append("current_state")
+    if success_criteria is not None:
+        update["success_criteria"] = success_criteria
+        changed_fields.append("success_criteria")
+    if risks_or_unknowns is not None:
+        update["risks_or_unknowns"] = risks_or_unknowns
+        changed_fields.append("risks_or_unknowns")
+
+    if not update:
+        return "No goal fields changed"
+
+    ctx.deps.goal = ctx.deps.goal.model_copy(update=update)
+    entry = f"Updated goal summary ({', '.join(changed_fields)}): {explanation}"
+    ctx.deps.change_log.append(entry)
+    return f"Updated goal fields: {', '.join(changed_fields)}"
+
+
+@_adaptation_agent.tool
+async def report_blocker(ctx: RunContext[AdaptationContext], description: str, explanation: str) -> str:
+    """Mark the goal as blocked due to an external blocker that prevents progress.
+
+    Args:
+        description: Short description of what is blocking progress (shown to the user)
+        explanation: Why this is being recorded now
+    """
+    logger.info("Tool report_blocker: description=%r reason=%s", description, explanation)
+    ctx.deps.goal = ctx.deps.goal.model_copy(update={"status": GoalStatus.blocked, "blocker_reason": description})
+    entry = f"Goal blocked: {description}"
+    ctx.deps.change_log.append(entry)
+    return f"Goal marked as blocked: {description}"
+
+
+@dataclass(frozen=True)
 class GoalsAI:
+    clarifying_agent: Agent[None, _QuestionsResult]
+    sufficiency_agent: Agent[None, _SufficiencyOutput]
+    plan_agent: Agent[None, _PlanOutput]
+    adaptation_agent: Agent[AdaptationContext, str]
+
     async def generate_questions(self, goal_id: str, description: str) -> tuple[str, list[ClarifyingQuestion]]:
-        result = await _clarifying_agent.run(f"Goal description: {description}")
+        result = await self.clarifying_agent.run(f"Goal description: {description}")
         title = result.output.title
         questions = []
         for i, q in enumerate(result.output.questions, start=1):
@@ -323,7 +608,7 @@ class GoalsAI:
             "10 absolute max then stop and plan with assumptions.\n\n"
             f"Q&A so far:\n{qa_text}"
         )
-        result = await _sufficiency_agent.run(prompt)
+        result = await self.sufficiency_agent.run(prompt)
         summary = GoalSummary(
             synopsis=result.output.synopsis,
             time_constraints=result.output.time_constraints,
@@ -377,7 +662,7 @@ class GoalsAI:
             + ("\n\n".join(summary_blocks) + "\n\n" if summary_blocks else "")
             + f"Clarifying Q&A:\n{qa_text}"
         )
-        result = await _plan_agent.run(prompt)
+        result = await self.plan_agent.run(prompt)
 
         node_id_to_milestone_id: dict[str, str] = {}
         milestones: list[Milestone] = []
@@ -441,3 +726,88 @@ class GoalsAI:
         ]
 
         return final_milestones, steps
+
+    async def adapt_plan(
+        self,
+        goal: Goal,
+        milestones: list[Milestone],
+        steps: list[Step],
+        user_message: str,
+        change_history: list[str] | None = None,
+    ) -> tuple[Goal, list[Milestone], list[Step], list[str], str]:
+        node_id_to_milestone_id = {m.node_id: m.id for m in milestones}
+        milestone_id_to_node_id = {m.id: m.node_id for m in milestones}
+
+        context = AdaptationContext(
+            goal=goal,
+            milestones=list(milestones),
+            steps=list(steps),
+            node_id_to_milestone_id=node_id_to_milestone_id,
+            milestone_id_to_node_id=milestone_id_to_node_id,
+        )
+
+        summary_blocks = []
+        if goal.synopsis:
+            summary_blocks.append(f"Synopsis: {goal.synopsis}")
+        if goal.time_constraints:
+            summary_blocks.append("Time constraints:\n" + "\n".join(f"- {item}" for item in goal.time_constraints))
+        if goal.resources:
+            summary_blocks.append("Resources:\n" + "\n".join(f"- {item}" for item in goal.resources))
+        if goal.current_state:
+            summary_blocks.append("Current state:\n" + "\n".join(f"- {item}" for item in goal.current_state))
+        if goal.success_criteria:
+            summary_blocks.append("Success criteria:\n" + "\n".join(f"- {item}" for item in goal.success_criteria))
+        if goal.risks_or_unknowns:
+            summary_blocks.append("Risks or unknowns:\n" + "\n".join(f"- {item}" for item in goal.risks_or_unknowns))
+
+        milestone_lines = []
+        steps_by_milestone: dict[str, list[Step]] = {}
+        for s in steps:
+            if s.milestone_id:
+                steps_by_milestone.setdefault(s.milestone_id, []).append(s)
+
+        for m in milestones:
+            dep_node_ids = [milestone_id_to_node_id.get(d, d) for d in m.depends_on]
+            deps_str = f" depends_on=[{', '.join(dep_node_ids)}]" if dep_node_ids else ""
+            milestone_lines.append(f'- {m.node_id} [{m.status}] "{m.title}"{deps_str}')
+            if m.description:
+                milestone_lines.append(f"  Description: {m.description}")
+            for s in steps_by_milestone.get(m.id, []):
+                check = "x" if s.completed else " "
+                milestone_lines.append(f"  [{check}] {s.title}")
+
+        goal_level_steps = [s for s in steps if s.milestone_id is None]
+        if goal_level_steps:
+            milestone_lines.append("- Goal-level recurring tasks:")
+            for s in goal_level_steps:
+                milestone_lines.append(f"  [~] {s.title}")
+
+        if change_history:
+            history_section = (
+                "Previous adaptations (most recent last):\n"
+                + "\n".join(f"- {entry}" for entry in change_history)
+                + "\n\n"
+            )
+        else:
+            history_section = ""
+
+        prompt = (
+            f"Goal: {goal.title}\n\n"
+            + ("\n".join(summary_blocks) + "\n\n" if summary_blocks else "")
+            + history_section
+            + "Current milestones:\n"
+            + "\n".join(milestone_lines)
+            + f'\n\nUser\'s message about what changed:\n"{user_message}"'
+        )
+
+        result = await self.adaptation_agent.run(prompt, deps=context)
+        return context.goal, context.milestones, context.steps, context.change_log, result.output
+
+
+def create_goals_ai() -> GoalsAI:
+    return GoalsAI(
+        clarifying_agent=_clarifying_agent,
+        sufficiency_agent=_sufficiency_agent,
+        plan_agent=_plan_agent,
+        adaptation_agent=_adaptation_agent,
+    )

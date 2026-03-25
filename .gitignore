@@ -39,3 +39,6 @@ htmlcov/
 
 # MyPy
 .mypy_cache/
+CLAUDE.md
+AGENTS.md
+.claude/

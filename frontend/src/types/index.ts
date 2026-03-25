@@ -26,6 +26,9 @@ export interface Goal {
   due_date: string | null;
   created_at: string;
   blocker_reason: string | null;
+  change_history: string[];
+  milestones: Milestone[];
+  steps: Step[];
 }
 
 export interface ClarifyingQuestion {
@@ -57,7 +60,7 @@ export interface Step {
   milestone_id: string | null;
   title: string;
   completed: boolean;
-  priority: string;
+  priority: "normal" | "high";
   recurring: boolean;
   order: number;
 }
@@ -82,4 +85,9 @@ export interface SubmitAnswersResponse {
   status: "needs_more_questions" | "ready";
   questions: ClarifyingQuestion[];
   goal: Goal | null;
+}
+
+export interface AdaptPlanResponse {
+  plan: Plan;
+  summary: string;
 }

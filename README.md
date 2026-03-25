@@ -37,39 +37,41 @@ You describe a goal. Labe asks a few targeted clarifying questions — your avai
 
 ## Quick Start
 
-### 1. Set up environment variables
+### 1. Add your OpenAI API key
 
 ```bash
 cp .env.template .env
-# Fill in your OPENAI_API_KEY
+# Open .env and set OPENAI_API_KEY=sk-...
 ```
 
-### 2. Start the dev container
+Do this **before** opening the dev container so the key is available when LocalStack starts.
 
-Open the folder in VS Code, then when prompted click **"Reopen in Container"**.
+### 2. Open in dev container
 
-VS Code will build the Docker image, start LocalStack, and drop you into a fully configured dev environment. This takes a few minutes on first run.
+Open the repo folder in VS Code. When prompted, click **"Reopen in Container"** (or run **Dev Containers: Reopen in Container** from the command palette).
 
-### 3. Start the backend
+VS Code builds the Docker image, starts LocalStack, and creates the DynamoDB tables automatically. First run takes a few minutes.
 
-Press **F5** (or run `FastAPI Server` from the Run & Debug panel), or from a terminal:
+### 3. Start both servers from the Run & Debug panel
+
+Open the **Run & Debug** panel (`Ctrl+Shift+D` / `⇧⌘D`), then launch:
+
+- **`FastAPI Server`** — starts the backend on `localhost:8000` with auto-reload
+- **`Vite Dev Server`** — starts the frontend on `localhost:5173`
+
+Both can be running at the same time. You can also press **F5** to start whichever is selected.
+
+Or from a terminal inside the container:
 
 ```bash
-cd src
+# Backend (from /app/src)
 uvicorn main:app --host 0.0.0.0 --port 8000 --reload --access-log
-```
 
-### 4. Start the frontend
-
-Run `Vite Dev Server` from the Run & Debug panel, or from a terminal:
-
-```bash
-cd frontend
-npm install   # first time only
+# Frontend (from /app/frontend)
 npm run dev
 ```
 
-### 5. Open the app
+### 4. Open the app
 
 | Service | URL |
 |---|---|
